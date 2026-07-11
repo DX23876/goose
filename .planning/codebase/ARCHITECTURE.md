@@ -29,10 +29,10 @@ last_mapped: 2026-06-13
            │ delegates raw bytes                  │ bridge.request(method:)
            ▼                                      ▼
 ┌───────────────────────────┐     ┌────────────────────────────────┐
-│  GooseBLEClient           │     │  GooseRustBridge               │
+│  CoreBluetoothBLETransport           │     │  GooseRustBridge               │
 │  @Observable NSObject     │     │  GooseSwift/GooseRustBridge.    │
 │  @unchecked Sendable      │     │  swift                         │
-│  GooseSwift/GooseBLEClient│     │  JSON-over-C-FFI wrapper       │
+│  GooseSwift/CoreBluetoothBLETransport│     │  JSON-over-C-FFI wrapper       │
 │  .swift + 11 extensions   │     │  Multiple instances per design  │
 └──────────┬────────────────┘     └──────────┬──────────────────────┘
            │ CoreBluetooth callbacks          │ goose_bridge_handle_json()
@@ -57,7 +57,7 @@ last_mapped: 2026-06-13
 | `RootView` | Onboarding gate; renders `OnboardingView` or `AppShellView` | `GooseSwift/RootView.swift` |
 | `AppShellView` | `TabView` wiring; creates `HealthDataStore`; injects into environment | `GooseSwift/AppShellView.swift` |
 | `GooseAppModel` | Central `@MainActor @Observable` coordinator; owns all subsystems; 9 extension files | `GooseSwift/GooseAppModel.swift` + `GooseAppModel+*.swift` |
-| `GooseBLEClient` | `CBCentralManagerDelegate` + `CBPeripheralDelegate`; WHOOP GATT; command writes | `GooseSwift/GooseBLEClient.swift` + 11 extensions |
+| `CoreBluetoothBLETransport` | `CBCentralManagerDelegate` + `CBPeripheralDelegate`; WHOOP GATT; command writes | `GooseSwift/CoreBluetoothBLETransport.swift` + 11 extensions |
 | `GooseRustBridge` | JSON-over-FFI wrapper; calls `goose_bridge_handle_json` / `goose_bridge_free_string` | `GooseSwift/GooseRustBridge.swift` |
 | `HealthDataStore` | `@MainActor @Observable`; metric queries via own bridge instance; 18 extensions | `GooseSwift/HealthDataStore.swift` + extensions |
 | `NotificationFrameParser` | Delegates raw BLE bytes to Rust for frame reassembly | `GooseSwift/NotificationFrameParsing.swift` |
@@ -78,7 +78,7 @@ last_mapped: 2026-06-13
 **Key Characteristics:**
 - `GooseAppModel` is the single `@MainActor @Observable` coordinator; all UI mutation returns to it via `DispatchQueue.main.async { }` or `Task { @MainActor in ... }`.
 - `GooseRustBridge` is **not** a singleton. `GooseAppModel`, `HealthDataStore`, `OvernightSQLiteMirrorQueue`, and `CaptureFrameWriteQueue` each hold their own instance. The Rust side is stateless across calls; SQLite is the shared persistent store.
-- The Swift `@Observable` macro (iOS 17+, not the older `ObservableObject`) is used on `GooseAppModel` and `GooseBLEClient`. `HealthDataStore` also uses `@Observable`. `AppRouter` uses the older `ObservableObject` / `@Published`.
+- The Swift `@Observable` macro (iOS 17+, not the older `ObservableObject`) is used on `GooseAppModel` and `CoreBluetoothBLETransport`. `HealthDataStore` also uses `@Observable`. `AppRouter` uses the older `ObservableObject` / `@Published`.
 - `GooseStrainAccumulator` is the only Swift `actor` in the codebase. All other concurrency uses `@MainActor` + named `DispatchQueue`.
 
 ## Layers
@@ -94,7 +94,7 @@ last_mapped: 2026-06-13
 - Purpose: Business logic, BLE pipeline wiring, state machine, upload orchestration
 - Location: `GooseSwift/GooseAppModel.swift` + `GooseAppModel+*.swift` (9 extension files)
 - Contains: `@MainActor @Observable final class GooseAppModel`; all named dispatch queues; pipeline objects as `let` properties
-- Depends on: `GooseBLEClient`, `GooseRustBridge` (`let rust`), `CaptureFrameWriteQueue`, `GooseUploadService`, `GooseNetworkMonitor`
+- Depends on: `CoreBluetoothBLETransport`, `GooseRustBridge` (`let rust`), `CaptureFrameWriteQueue`, `GooseUploadService`, `GooseNetworkMonitor`
 - Used by: `GooseSwiftApp`, all SwiftUI views
 
 **Metric Query Layer:**
@@ -106,7 +106,7 @@ last_mapped: 2026-06-13
 
 **BLE Layer:**
 - Purpose: CoreBluetooth central manager; WHOOP GATT protocol; command writes; notification callbacks
-- Location: `GooseSwift/GooseBLEClient.swift` + 11 extension files
+- Location: `GooseSwift/CoreBluetoothBLETransport.swift` + 11 extension files
 - Contains: `CBCentralManagerDelegate`, `CBPeripheralDelegate`; frame command builders; haptic commands
 - Depends on: CoreBluetooth, OSLog; calls back into `GooseAppModel` via closures/delegates
 - Used by: `GooseAppModel` (holds the instance as `let ble`)
@@ -135,7 +135,7 @@ last_mapped: 2026-06-13
 
 ### Primary Real-Time BLE → SQLite Path
 
-1. WHOOP sends GATT notification → `CBPeripheralDelegate.peripheral(_:didUpdateValueFor:)` in `GooseBLEClient+PeripheralDelegate.swift`
+1. WHOOP sends GATT notification → `CBPeripheralDelegate.peripheral(_:didUpdateValueFor:)` in `CoreBluetoothBLETransport+PeripheralDelegate.swift`
 2. `GooseAppModel.handleNotification(_:)` called on `@MainActor` — `GooseAppModel+NotificationPipeline.swift`
 3. Dispatched to `notificationIngestQueue` (background, `.utility`); `NotificationFrameParser` reassembles multi-packet frames via Rust
 4. Result returned to `@MainActor`; if a capture session is active, `CaptureFrameWriteQueue.enqueue(_:)` batches rows
@@ -152,7 +152,7 @@ last_mapped: 2026-06-13
 ### Sleep Sync Path
 
 1. BLE connects → `maybeScheduleMorningSleepSync()` in `GooseAppModel+SleepSync.swift`
-2. `syncBandSleepHistory()` issues historical sync BLE commands via `GooseBLEClient+HistoricalCommands.swift`
+2. `syncBandSleepHistory()` issues historical sync BLE commands via `CoreBluetoothBLETransport+HistoricalCommands.swift`
 3. On completion, `onHistoricalSyncCompleted?()` callback fires (closure set by `AppShellView`) → triggers `HealthDataStore` metric refresh
 
 ### Upload Path
@@ -185,7 +185,7 @@ last_mapped: 2026-06-13
 
 **Extension-per-Concern Split (all three major classes):**
 - `GooseAppModel`: `+NotificationPipeline`, `+Upload`, `+SleepSync`, `+BandFirstSync`, `+ActivityRecording`, `+ActivityTimeline`, `+HealthCapture`, `+Lifecycle`, `+PacketPublishing`
-- `GooseBLEClient`: `+CentralDelegate`, `+Commands`, `+DebugAndSync`, `+Haptics`, `+HistoricalCommands`, `+HistoricalHandlers`, `+HRMonitor`, `+Parsing`, `+PeripheralDelegate`, `+UserActions`, `+VitalsAndLogging`
+- `CoreBluetoothBLETransport`: `+CentralDelegate`, `+Commands`, `+DebugAndSync`, `+Haptics`, `+HistoricalCommands`, `+HistoricalHandlers`, `+HRMonitor`, `+Parsing`, `+PeripheralDelegate`, `+UserActions`, `+VitalsAndLogging`
 - `HealthDataStore`: `+ActivitySnapshots`, `+BaselineProgress`, `+Cardio`, `+CoachSummaries`, `+Exercise`, `+IMUSteps`, `+PacketInputs`, `+Readiness`, `+Recovery`, `+Sleep`, `+Snapshots`, `+StagingSleep`, `+StaticSnapshots`, `+StressEnergy`, `+Trends`, `+Utilities`, `+V24Biometrics`, `+Vitals`
 
 **Testability Protocols (added Phase 72):**

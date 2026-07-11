@@ -60,7 +60,7 @@ final class GooseBLETypesTests: XCTestCase {
 
   func testGenerationDerivation_gen4ServiceUUID() {
     let gen4ServiceUUID = CBUUID(string: "61080001-8d6d-82b8-614a-1c8cb0f8dcc6")
-    let generation = GooseBLEClient.generation(from: [gen4ServiceUUID])
+    let generation = CoreBluetoothBLETransport.generation(from: [gen4ServiceUUID])
     XCTAssertEqual(generation, "4.0", "61080001 service UUID should derive generation 4.0")
   }
 }
@@ -94,7 +94,7 @@ final class MockRustBridge: GooseRustBridging {
   }
 }
 ```
-- `MockBLEClient.swift` — stub for `GooseBLEClient`
+- `MockBLEClient.swift` — stub for `CoreBluetoothBLETransport`
 - `MockHealthStore.swift` — delegates to `MockRustBridge`; used for `HealthDataStore` tests
 
 **URL mocking for network tests:**
@@ -110,7 +110,7 @@ Used in `GooseUploadServiceTests.swift` for HTTP retry logic.
 **What to mock:**
 - `GooseRustBridging` protocol when testing Swift logic that calls the bridge
 - `URLProtocol` subclass for HTTP layer tests
-- `GooseBLEClient` for callers that depend on BLE state
+- `CoreBluetoothBLETransport` for callers that depend on BLE state
 
 **What NOT to mock:**
 - The real `GooseRustBridge` when testing bridge method routing (use actual Rust bridge with a temp DB)
@@ -161,7 +161,7 @@ fn bridge_returns_core_version_payload() {
 |------|--------------|
 | `GooseBLETypesTests.swift` | BLE UUID → generation derivation, `rustDeviceType` property, `WearableDescriptor` |
 | `GooseUploadServiceTests.swift` | `buildUploadPayload` payload fields, HTTP retry logic (503/200), source-level assertion against hardcoded literals |
-| `HRMonitorStateTests.swift` | `GooseBLEClient` default state, `@Published` property assignment |
+| `HRMonitorStateTests.swift` | `CoreBluetoothBLETransport` default state, `@Published` property assignment |
 | `TrendsFetchTests.swift` | `HealthDataStore.fetchTrendsSeries` bridge method routing |
 | `WorkoutEntryTests.swift` | Workout data model |
 | `WorkoutLiveActivityAttributesTests.swift` | `ActivityAttributes` shared type |
@@ -239,7 +239,7 @@ func test_upload503_leavesSynced0() async throws {
 - `PassiveActivityDetectionPipeline` — heuristic detection logic untested in Swift
 
 **Medium priority:**
-- `GooseBLEClient` parsing and command logic — only default-state properties tested; GATT protocol parsing untested from Swift
+- `CoreBluetoothBLETransport` parsing and command logic — only default-state properties tested; GATT protocol parsing untested from Swift
 - `CaptureFrameWriteQueue` — batched insert logic untested
 
 **Low priority (covered by Rust):**

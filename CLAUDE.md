@@ -14,6 +14,62 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 - **Git**: planning docs committed (commit_docs: true)
 <!-- GSD:project-end -->
 
+## Common Commands
+
+### iOS build (simulator)
+```bash
+xcodebuild -project GooseSwift.xcodeproj -scheme GooseSwift -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -derivedDataPath /tmp/goose-swift-deriveddata build
+```
+
+### iOS build (physical device)
+```bash
+xcodebuild -project GooseSwift.xcodeproj -scheme GooseSwift -configuration Debug \
+  -destination 'platform=iOS,id=<device-id>' \
+  -derivedDataPath /tmp/goose-swift-deriveddata-device -allowProvisioningUpdates build
+```
+List device IDs: `xcrun devicectl list devices`
+
+### Rust core only (cross-compile for iOS)
+```bash
+PLATFORM_NAME=iphonesimulator CURRENT_ARCH=arm64 Scripts/build_ios_rust.sh   # simulator
+PLATFORM_NAME=iphoneos CURRENT_ARCH=arm64 Scripts/build_ios_rust.sh          # device
+```
+The `.a` archives are gitignored; Xcode runs this script automatically as a build phase. Set `GOOSE_SKIP_RUST_CORE_BUILD=1` to skip recompilation when the archive is already current.
+
+### Tests
+```bash
+# Rust — all tests
+cargo test --manifest-path Rust/core/Cargo.toml
+# Rust — single test file
+cargo test --manifest-path Rust/core/Cargo.toml --test protocol_tests
+# Rust — with stdout
+cargo test --manifest-path Rust/core/Cargo.toml -- --nocapture
+
+# Swift — GooseSwiftTests target, via xcodebuild
+xcodebuild test -project GooseSwift.xcodeproj -scheme GooseSwift \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -derivedDataPath /tmp/goose-swift-deriveddata
+```
+Swift tests can also be run from Xcode (Product → Test). There is no single-test CLI invocation for Swift; use `-only-testing:GooseSwiftTests/<ClassName>/<methodName>` with `xcodebuild test` to scope to one test.
+
+### Lint / format (Rust)
+```bash
+cd Rust/core && cargo fmt          # format
+cd Rust/core && cargo fmt -- --check   # CI check, no changes
+cd Rust/core && cargo clippy       # lint (non-blocking in CI, but don't add new warnings)
+cd Rust/core && cargo check        # fast type-check
+```
+Swift has no formatter/linter config in this repo (no `.swiftformat`/`.swiftlint.yml`) — match surrounding file style by hand.
+
+### Self-hosted server
+```bash
+cd server && cp .env.example .env   # set GOOSE_API_KEY, GOOSE_DB_PASSWORD
+docker compose up -d --build
+curl -s localhost:8770/healthz      # → {"status":"ok"}
+```
+
 <!-- GSD:stack-start source:codebase/STACK.md -->
 ## Technology Stack
 
@@ -76,12 +132,12 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 ## Conventions
 
 ## Naming Patterns
-- Swift source files use PascalCase matching the primary type they contain: `GooseBLEClient.swift`, `ActivityModels.swift`, `HealthDataStore.swift`
-- Extensions that add a functional area to a class use `+` suffix notation: `GooseBLEClient+Commands.swift`, `GooseAppModel+OvernightRun.swift`, `HealthDataStore+Utilities.swift`
+- Swift source files use PascalCase matching the primary type they contain: `CoreBluetoothBLETransport.swift`, `ActivityModels.swift`, `HealthDataStore.swift`
+- Extensions that add a functional area to a class use `+` suffix notation: `CoreBluetoothBLETransport+Commands.swift`, `GooseAppModel+OvernightRun.swift`, `HealthDataStore+Utilities.swift`
 - Views use a `Views` suffix for files containing multiple related views: `HealthDashboardViews.swift`, `SleepV2BevelTrendViews.swift`
 - Type definition files use a `Types` suffix: `GooseBLETypes.swift`, `CoachChatTypes.swift`, `HealthPacketCaptureTypes.swift`
 - Models use a `Models` suffix: `ActivityModels.swift`, `HealthModels.swift`, `OnboardingModels.swift`
-- PascalCase throughout: `GooseAppModel`, `GooseBLEClient`, `OvernightSQLiteMirrorQueue`
+- PascalCase throughout: `GooseAppModel`, `CoreBluetoothBLETransport`, `OvernightSQLiteMirrorQueue`
 - Prefix with the subsystem or domain name for disambiguation: `GooseMessage`, `GooseSyncToast`, `GooseHistoricalSyncProgress`
 - Enum cases use camelCase: `case debug`, `case poweredOn`, `case healthMonitor`
 - Error types use PascalCase with an `Error` suffix: `GooseRustBridgeError`, `OpenAIResponsesError`
@@ -128,13 +184,50 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 
 ## System Overview
 ```text
+┌──────────────────────────────────────────────────────────────────────┐
+│                        SwiftUI Views (177 .swift files)              │
+│   RootView → AppShellView → [HomeView / HealthView / CoachView /    │
+│                               MoreView]                              │
+│   All views observe GooseAppModel via @Environment                  │
+│   Health tab observes HealthDataStore (@State in AppShellView)      │
+└────────────────────────┬───────────────────────────────┬────────────┘
+                         │ @Observable                   │ @Observable
+                         ▼                               ▼
+┌───────────────────────────────┐     ┌─────────────────────────────┐
+│  GooseAppModel (@MainActor)   │     │  HealthDataStore (@MainActor)│
+│  GooseSwift/GooseAppModel.swift│    │  GooseSwift/HealthDataStore. │
+│  + GooseAppModel+*.swift (9)  │     │  swift + HealthDataStore+*.  │
+│                               │     │  swift (18 extensions)       │
+│  Owns: BLE, pipelines,        │     │  Owns: own GooseRustBridge,  │
+│  upload, strain accumulator   │     │  metric query state          │
+└──────────┬────────────────────┘     └──────────┬──────────────────┘
+           │ delegates raw bytes                  │ bridge.request(method:)
+           ▼                                      ▼
+┌───────────────────────────┐     ┌────────────────────────────────┐
+│  CoreBluetoothBLETransport │     │  GooseRustBridge               │
+│  @Observable NSObject     │     │  GooseSwift/GooseRustBridge.    │
+│  @unchecked Sendable      │     │  swift                         │
+│  GooseSwift/CoreBluetoothBLETransport│     │  JSON-over-C-FFI wrapper       │
+│  .swift + 11 extensions   │     │  Multiple instances per design  │
+└──────────┬────────────────┘     └──────────┬──────────────────────┘
+           │ CoreBluetooth callbacks          │ goose_bridge_handle_json()
+           │                                  ▼
+           │                    ┌──────────────────────────────────┐
+           │                    │  Rust core (libgoose_core.a)     │
+           │                    │  Rust/core/src/bridge.rs         │
+           │                    │  76 .rs modules, schema v20      │
+           │                    │  Protocol parsing, metric algos, │
+           │                    │  SQLite persistence (rusqlite)   │
+           └──────────────────►│  goose.sqlite                    │
+           (via CaptureFrameWriteQueue       └──────────────────────────────────┘
+            + OvernightSQLiteMirrorQueue)
 ```
 ## Component Responsibilities
 | Component | Responsibility | File |
 |-----------|----------------|------|
 | `GooseSwiftApp` | App entry point; scene config; lifecycle events | `GooseSwift/GooseSwiftApp.swift` |
 | `GooseAppModel` | Central coordinator; owns BLE client, Rust bridge, packet pipelines, overnight guard | `GooseSwift/GooseAppModel.swift` + `GooseAppModel+*.swift` |
-| `GooseBLEClient` | CoreBluetooth central; WHOOP GATT connection; packet framing; command writes | `GooseSwift/GooseBLEClient.swift` + `GooseBLEClient+*.swift` |
+| `CoreBluetoothBLETransport` | CoreBluetooth central; WHOOP GATT connection; packet framing; command writes | `GooseSwift/CoreBluetoothBLETransport.swift` + `CoreBluetoothBLETransport+*.swift` |
 | `GooseRustBridge` | JSON-over-FFI bridge to Rust; serialises requests, deserialises responses, tracks timing | `GooseSwift/GooseRustBridge.swift` |
 | `HealthDataStore` | Rust bridge consumer for metric scores; @MainActor; owns packet input reports | `GooseSwift/HealthDataStore.swift` + `HealthDataStore+*.swift` |
 | `AppRouter` | Tab selection, deep-link handling, navigation paths | `GooseSwift/AppRouter.swift` |
@@ -151,7 +244,7 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 ## Pattern Overview
 - `GooseAppModel` is the single `@MainActor` coordinator; UI observes it via `@EnvironmentObject`.
 - The Rust library (`libgoose_core`) is stateless from Swift's perspective; state is persisted in SQLite. Each bridge call passes the `database_path` argument.
-- BLE bytes flow inward through callbacks on `GooseBLEClient`, are reassembled into frames on `notificationIngestQueue`, parsed via `GooseRustBridge`, then written to SQLite via `CaptureFrameWriteQueue`.
+- BLE bytes flow inward through callbacks on `CoreBluetoothBLETransport`, are reassembled into frames on `notificationIngestQueue`, parsed via `GooseRustBridge`, then written to SQLite via `CaptureFrameWriteQueue`.
 - Thread safety: `@MainActor` for all UI mutations; dedicated `DispatchQueue` instances for BLE, parse, write, and pipeline work; `NSLock` guards for shared counters.
 ## Layers
 - Purpose: SwiftUI rendering, user interaction
@@ -162,7 +255,7 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 - Purpose: Business logic, state machine, pipeline wiring
 - Location: `GooseSwift/GooseAppModel.swift` + `GooseAppModel+*.swift`
 - Contains: `@MainActor final class GooseAppModel: ObservableObject`; all `@Published` state; extension files split by concern
-- Depends on: `GooseBLEClient`, `GooseRustBridge`, dispatch queues, `NotificationFrameParser`, `CaptureFrameWriteQueue`
+- Depends on: `CoreBluetoothBLETransport`, `GooseRustBridge`, dispatch queues, `NotificationFrameParser`, `CaptureFrameWriteQueue`
 - Used by: `GooseSwiftApp`, SwiftUI views
 - Purpose: Query Rust bridge for scored metrics; publish results to views
 - Location: `GooseSwift/HealthDataStore.swift` + `HealthDataStore+*.swift`
@@ -170,7 +263,7 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 - Depends on: `GooseRustBridge` (each method call passes `database_path`)
 - Used by: `AppShellView` (creates one instance), view tabs
 - Purpose: CoreBluetooth central manager; WHOOP GATT protocol; command writes and notifications
-- Location: `GooseSwift/GooseBLEClient.swift` + `GooseBLEClient+*.swift`
+- Location: `GooseSwift/CoreBluetoothBLETransport.swift` + `CoreBluetoothBLETransport+*.swift`
 - Contains: `CBCentralManagerDelegate`, `CBPeripheralDelegate`; proprietary WHOOP command framing
 - Depends on: CoreBluetooth, OSLog
 - Used by: `GooseAppModel` (holds the instance)
@@ -201,7 +294,7 @@ iOS app (SwiftUI + Rust core) that reads biometric data from WHOOP devices via B
 - Examples: `GooseSwift/GooseRustBridge.swift` (lines 26–81)
 - Pattern: Each caller creates its own bridge instance; bridge is stateless. Always pass `database_path` in args for storage-backed methods.
 - Purpose: Large class split into focused extension files by concern
-- Examples: `GooseBLEClient+Commands.swift`, `GooseBLEClient+HistoricalCommands.swift`, `GooseBLEClient+Parsing.swift`, `GooseBLEClient+PeripheralDelegate.swift`
+- Examples: `CoreBluetoothBLETransport+Commands.swift`, `CoreBluetoothBLETransport+HistoricalCommands.swift`, `CoreBluetoothBLETransport+Parsing.swift`, `CoreBluetoothBLETransport+PeripheralDelegate.swift`
 - Pattern: Each extension file owns a coherent slice of BLE behaviour; all share state on the parent class
 - Purpose: Coordinator split across extension files by domain
 - Examples: `GooseAppModel+NotificationPipeline.swift`, `GooseAppModel+ActivityRecording.swift`, `GooseAppModel+OvernightRun.swift`

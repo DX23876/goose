@@ -9,14 +9,14 @@ last_mapped: 2026-06-13
 ## Naming Patterns
 
 **Files:**
-- PascalCase matching the primary type: `GooseBLEClient.swift`, `ActivityModels.swift`, `HealthDataStore.swift`
-- Extension files use `+` suffix: `GooseBLEClient+Commands.swift`, `GooseAppModel+Upload.swift`, `HealthDataStore+Sleep.swift`
+- PascalCase matching the primary type: `CoreBluetoothBLETransport.swift`, `ActivityModels.swift`, `HealthDataStore.swift`
+- Extension files use `+` suffix: `CoreBluetoothBLETransport+Commands.swift`, `GooseAppModel+Upload.swift`, `HealthDataStore+Sleep.swift`
 - View collections use `Views` suffix: `HealthDashboardViews.swift`, `SleepV2BevelTrendViews.swift`
 - Type definition files use `Types` suffix: `GooseBLETypes.swift`, `CoachChatTypes.swift`
 - Model files use `Models` suffix: `ActivityModels.swift`, `OnboardingModels.swift`
 
 **Types:**
-- PascalCase throughout: `GooseAppModel`, `GooseBLEClient`, `OvernightSQLiteMirrorQueue`
+- PascalCase throughout: `GooseAppModel`, `CoreBluetoothBLETransport`, `OvernightSQLiteMirrorQueue`
 - Error types append `Error` suffix: `GooseRustBridgeError`, `OpenAIResponsesError`
 - Domain/subsystem prefix for disambiguation: `GooseMessage`, `GooseSyncToast`
 
@@ -115,7 +115,7 @@ let logger = Logger(subsystem: "com.goose.swift", category: "ble")
 ```
 
 **Category strings by subsystem:**
-- BLE: `"ble"` — `GooseSwift/GooseBLEClient.swift`, `GooseSwift/GooseBLEDataValidator.swift`
+- BLE: `"ble"` — `GooseSwift/CoreBluetoothBLETransport.swift`, `GooseSwift/GooseBLEDataValidator.swift`
 - Upload: `"upload"` — `GooseSwift/GooseUploadService.swift`
 
 **Level usage:**
@@ -133,7 +133,7 @@ let logger = Logger(subsystem: "com.goose.swift", category: "ble")
 ## Module / Type Design
 
 **Large types split by concern using extension files:**
-- `GooseBLEClient` → `+Commands`, `+HistoricalCommands`, `+Parsing`, `+PeripheralDelegate`, `+VitalsAndLogging`
+- `CoreBluetoothBLETransport` → `+Commands`, `+HistoricalCommands`, `+Parsing`, `+PeripheralDelegate`, `+VitalsAndLogging`
 - `GooseAppModel` → `+NotificationPipeline`, `+ActivityRecording`, `+OvernightRun`, `+Upload`
 - `HealthDataStore` → `+PacketInputs`, `+Snapshots`, `+Sleep`, `+Cardio`
 
