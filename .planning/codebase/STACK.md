@@ -40,7 +40,7 @@ last_mapped: 2026-06-13
 
 **System:**
 - Foundation — universal; 97 files
-- CoreBluetooth — BLE communication with WHOOP; `GooseSwift/GooseBLEClient.swift` + `GooseBLEClient+*.swift`; 14 files
+- CoreBluetooth — BLE communication with WHOOP; `GooseSwift/CoreBluetoothBLETransport.swift` + `CoreBluetoothBLETransport+*.swift`; 14 files
 - HealthKit — body mass autofill from Apple Health; `GooseSwift/GooseAppModel+HealthKit.swift`; 11 files
 - CoreLocation + MapKit — GPS for outdoor workouts; 12 + 9 files
 - Network — `NWPathMonitor` for reachability; `GooseSwift/GooseNetworkMonitor.swift`
