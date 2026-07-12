@@ -128,6 +128,7 @@ pub const BRIDGE_METHODS: &[&str] = &[
     "metric_series.query_range",
     "metric_series.upsert",
     "metrics.activity_unavailable_daily_status",
+    "metrics.bio_age",
     "metrics.built_in_definitions",
     "metrics.daily_activity_metrics",
     "metrics.daily_recovery_metrics",

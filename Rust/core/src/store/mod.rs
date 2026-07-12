@@ -21,7 +21,7 @@ use crate::{
     validation_labels::OFFICIAL_WHOOP_LABEL_POLICY,
 };
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 25;
+pub const CURRENT_SCHEMA_VERSION: i64 = 26;
 pub const DEFAULT_RAW_EVIDENCE_PAYLOAD_RETENTION_LIMIT_BYTES: i64 = 512 * 1024 * 1024;
 
 const ALLOWED_METRIC_SOURCE_KINDS: [&str; 4] = [
@@ -1083,6 +1083,18 @@ pub struct ExternalSampleRow {
     pub created_at: String,
 }
 
+/// BIO-01: One daily Bio Age snapshot row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BioAgeSnapshotRow {
+    pub date: String,
+    pub chrono_age_years: f64,
+    pub bio_age_years: f64,
+    pub delta_years: f64,
+    pub confidence: String,
+    pub factors_json: String,
+    pub created_at: String,
+}
+
 /// EXT-01: Source-priority resolver. WHOOP-derived values always win when present;
 /// an externally sourced value (Apple Health / Apple Watch) is used only as a fallback
 /// for windows where no WHOOP value exists. Pure combinator — callers supply both
@@ -2057,6 +2069,23 @@ impl GooseStore {
 
             INSERT OR IGNORE INTO goose_schema_migrations(version) VALUES (25);
             PRAGMA user_version = 25;
+
+            -- BIO-01: daily Bio Age snapshots for trend rendering. One row per date
+            -- (INSERT OR REPLACE on the date PK), storing the composite plus the full
+            -- per-factor breakdown as JSON so the detail UI can render contributions
+            -- without recomputing. confidence is the tier string (calibrating/building/solid).
+            CREATE TABLE IF NOT EXISTS bio_age_snapshots (
+                date TEXT PRIMARY KEY,
+                chrono_age_years REAL NOT NULL,
+                bio_age_years REAL NOT NULL,
+                delta_years REAL NOT NULL,
+                confidence TEXT NOT NULL,
+                factors_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            INSERT OR IGNORE INTO goose_schema_migrations(version) VALUES (26);
+            PRAGMA user_version = 26;
             "#,
         )?;
         } // conn lock released here — ensure_* each re-acquire independently
@@ -2258,6 +2287,60 @@ impl GooseStore {
         )
         .optional()
         .map_err(GooseError::from)
+    }
+
+    /// BIO-01: Upsert one daily Bio Age snapshot (INSERT OR REPLACE on the date PK), so
+    /// recomputing the same day overwrites rather than duplicating.
+    pub fn upsert_bio_age_snapshot(
+        &self,
+        date: &str,
+        chrono_age_years: f64,
+        bio_age_years: f64,
+        delta_years: f64,
+        confidence: &str,
+        factors_json: &str,
+    ) -> GooseResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO bio_age_snapshots \
+             (date, chrono_age_years, bio_age_years, delta_years, confidence, factors_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                date,
+                chrono_age_years,
+                bio_age_years,
+                delta_years,
+                confidence,
+                factors_json
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// BIO-01: Return Bio Age snapshots in the inclusive date range [start_date, end_date],
+    /// ordered by date ascending, for trend rendering.
+    pub fn bio_age_snapshots_between(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> GooseResult<Vec<BioAgeSnapshotRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT date, chrono_age_years, bio_age_years, delta_years, confidence, factors_json, created_at \
+             FROM bio_age_snapshots \
+             WHERE date >= ?1 AND date <= ?2 \
+             ORDER BY date ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![start_date, end_date], bio_age_snapshot_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub(super) fn ensure_overnight_mirror_tables(&self) -> GooseResult<()> {
@@ -4205,6 +4288,18 @@ fn external_sample_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Externa
         end_unix_ms: row.get(6)?,
         source: row.get(7)?,
         created_at: row.get(8)?,
+    })
+}
+
+fn bio_age_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BioAgeSnapshotRow> {
+    Ok(BioAgeSnapshotRow {
+        date: row.get(0)?,
+        chrono_age_years: row.get(1)?,
+        bio_age_years: row.get(2)?,
+        delta_years: row.get(3)?,
+        confidence: row.get(4)?,
+        factors_json: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
