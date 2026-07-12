@@ -32,6 +32,7 @@ mod body_composition;
 mod capabilities;
 mod capture;
 mod debug;
+mod external;
 mod metrics;
 mod realtime;
 mod sleep;
@@ -115,6 +116,9 @@ pub const BRIDGE_METHODS: &[&str] = &[
     "exercise.sessions_between",
     "export.raw_timeframe",
     "export.validate_bundle",
+    "external.import_daily_rollups",
+    "external.import_samples",
+    "external.resolve_metric_for_day",
     "health_sync.activity_dry_run",
     "health_sync.dry_run",
     "historical_sync.dry_run",
@@ -545,6 +549,10 @@ fn handle_bridge_request_inner(request: BridgeRequest) -> BridgeResponse {
 
     if method.starts_with("realtime.") {
         return realtime::dispatch_realtime(&request);
+    }
+
+    if method.starts_with("external.") {
+        return external::dispatch_external(&request);
     }
 
     if method.starts_with("metrics.")
@@ -1120,6 +1128,7 @@ mod tests {
         let domain_source = concat!(
             include_str!("body_composition.rs"),
             include_str!("capabilities.rs"),
+            include_str!("external.rs"),
             include_str!("metrics.rs"),
             include_str!("realtime.rs"),
             include_str!("sleep.rs"),
