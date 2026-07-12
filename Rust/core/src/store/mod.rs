@@ -10,7 +10,7 @@ mod metrics;
 mod realtime;
 mod sleep;
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -21,7 +21,7 @@ use crate::{
     validation_labels::OFFICIAL_WHOOP_LABEL_POLICY,
 };
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 24;
+pub const CURRENT_SCHEMA_VERSION: i64 = 26;
 pub const DEFAULT_RAW_EVIDENCE_PAYLOAD_RETENTION_LIMIT_BYTES: i64 = 512 * 1024 * 1024;
 
 const ALLOWED_METRIC_SOURCE_KINDS: [&str; 4] = [
@@ -1069,6 +1069,88 @@ pub struct BodyCompositionRow {
     pub water_pct: Option<f64>,
 }
 
+/// EXT-01: One row from external_samples (Apple Health / Apple Watch import).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExternalSampleRow {
+    pub platform: String,
+    pub platform_record_id: String,
+    pub metric: String,
+    pub value: f64,
+    pub unit: String,
+    pub start_unix_ms: i64,
+    pub end_unix_ms: i64,
+    pub source: String,
+    pub created_at: String,
+}
+
+/// BIO-01: One daily Bio Age snapshot row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BioAgeSnapshotRow {
+    pub date: String,
+    pub chrono_age_years: f64,
+    pub bio_age_years: f64,
+    pub delta_years: f64,
+    pub confidence: String,
+    pub factors_json: String,
+    pub created_at: String,
+}
+
+/// EXT-01: Source-priority resolver. WHOOP-derived values always win when present;
+/// an externally sourced value (Apple Health / Apple Watch) is used only as a fallback
+/// for windows where no WHOOP value exists. Pure combinator — callers supply both
+/// candidates already resolved for the same metric+window so this function has no
+/// knowledge of where either value came from.
+pub fn resolve_metric_priority<T>(
+    whoop_value: Option<T>,
+    external_value: Option<T>,
+) -> Option<(T, &'static str)> {
+    match (whoop_value, external_value) {
+        (Some(v), _) => Some((v, "whoop")),
+        (None, Some(v)) => Some((v, "apple_health")),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod resolve_metric_priority_tests {
+    use super::resolve_metric_priority;
+
+    #[test]
+    fn whoop_wins_when_both_present() {
+        let resolved = resolve_metric_priority(Some(42.0), Some(99.0));
+        assert_eq!(
+            resolved,
+            Some((42.0, "whoop")),
+            "WHOOP value must win over Apple Health when both exist"
+        );
+    }
+
+    #[test]
+    fn external_is_fallback_when_whoop_absent() {
+        let resolved = resolve_metric_priority(None, Some(99.0));
+        assert_eq!(
+            resolved,
+            Some((99.0, "apple_health")),
+            "Apple Health must fill the gap when WHOOP has no value"
+        );
+    }
+
+    #[test]
+    fn none_when_neither_present() {
+        let resolved: Option<(f64, &str)> = resolve_metric_priority(None, None);
+        assert_eq!(
+            resolved, None,
+            "No data from either source must resolve to None, not a fabricated value"
+        );
+    }
+
+    #[test]
+    fn whoop_wins_even_without_external_value() {
+        let resolved = resolve_metric_priority(Some(10.0), None);
+        assert_eq!(resolved, Some((10.0, "whoop")));
+    }
+}
+
 fn configure_read_write_connection(conn: &Connection) -> GooseResult<()> {
     conn.execute_batch(
         r#"
@@ -1957,6 +2039,53 @@ impl GooseStore {
 
             INSERT OR IGNORE INTO goose_schema_migrations(version) VALUES (24);
             PRAGMA user_version = 24;
+
+            -- EXT-01: externally sourced point samples (Apple Health / Apple Watch via
+            -- HealthKit). Idempotent on (platform, platform_record_id, metric) so a
+            -- HealthKit re-import never duplicates rows; a changed value from the same
+            -- record simply replaces the row (INSERT OR REPLACE in upsert_external_sample).
+            -- HRV is stored as its own metric kind (hrv_sdnn) — never conflated with the
+            -- WHOOP-derived RMSSD metric family (healthkit_rmssd_must_not_be_written_as_sdnn).
+            CREATE TABLE IF NOT EXISTS external_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                platform_record_id TEXT NOT NULL,
+                metric TEXT NOT NULL CHECK(metric IN (
+                    'hr', 'hrv_sdnn', 'rhr', 'spo2', 'resp_rate', 'vo2max', 'skin_temp'
+                )),
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                start_unix_ms INTEGER NOT NULL,
+                end_unix_ms INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE(platform, platform_record_id, metric)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_external_samples_metric_window
+                ON external_samples(metric, start_unix_ms, end_unix_ms);
+            CREATE INDEX IF NOT EXISTS idx_external_samples_by_platform
+                ON external_samples(platform, platform_record_id);
+
+            INSERT OR IGNORE INTO goose_schema_migrations(version) VALUES (25);
+            PRAGMA user_version = 25;
+
+            -- BIO-01: daily Bio Age snapshots for trend rendering. One row per date
+            -- (INSERT OR REPLACE on the date PK), storing the composite plus the full
+            -- per-factor breakdown as JSON so the detail UI can render contributions
+            -- without recomputing. confidence is the tier string (calibrating/building/solid).
+            CREATE TABLE IF NOT EXISTS bio_age_snapshots (
+                date TEXT PRIMARY KEY,
+                chrono_age_years REAL NOT NULL,
+                bio_age_years REAL NOT NULL,
+                delta_years REAL NOT NULL,
+                confidence TEXT NOT NULL,
+                factors_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            INSERT OR IGNORE INTO goose_schema_migrations(version) VALUES (26);
+            PRAGMA user_version = 26;
             "#,
         )?;
         } // conn lock released here — ensure_* each re-acquire independently
@@ -2066,6 +2195,150 @@ impl GooseStore {
                     water_pct: row.get(6)?,
                 })
             })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// EXT-01: Upsert one externally sourced sample (Apple Health / Apple Watch).
+    /// Idempotent on (platform, platform_record_id, metric) via INSERT OR REPLACE — a
+    /// re-import of the same HealthKit record never duplicates rows, and a corrected
+    /// value from the same record replaces the prior one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_external_sample(
+        &self,
+        platform: &str,
+        platform_record_id: &str,
+        metric: &str,
+        value: f64,
+        unit: &str,
+        start_unix_ms: i64,
+        end_unix_ms: i64,
+        source: &str,
+    ) -> GooseResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO external_samples \
+             (platform, platform_record_id, metric, value, unit, start_unix_ms, end_unix_ms, source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                platform,
+                platform_record_id,
+                metric,
+                value,
+                unit,
+                start_unix_ms,
+                end_unix_ms,
+                source
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// EXT-01: Return all external_samples rows for one metric overlapping
+    /// [start_unix_ms, end_unix_ms), sorted by start_unix_ms ascending.
+    pub fn external_samples_between(
+        &self,
+        metric: &str,
+        start_unix_ms: i64,
+        end_unix_ms: i64,
+    ) -> GooseResult<Vec<ExternalSampleRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT platform, platform_record_id, metric, value, unit, start_unix_ms, end_unix_ms, source, created_at \
+             FROM external_samples \
+             WHERE metric = ?1 AND start_unix_ms < ?3 AND end_unix_ms > ?2 \
+             ORDER BY start_unix_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![metric, start_unix_ms, end_unix_ms],
+                external_sample_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// EXT-01: The most recent external_samples row for one metric within
+    /// [start_unix_ms, end_unix_ms), by start_unix_ms. Used by the source-priority
+    /// resolver (resolve_metric_priority) as the Apple Health fallback candidate.
+    pub fn latest_external_sample_in_window(
+        &self,
+        metric: &str,
+        start_unix_ms: i64,
+        end_unix_ms: i64,
+    ) -> GooseResult<Option<ExternalSampleRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        conn.query_row(
+            "SELECT platform, platform_record_id, metric, value, unit, start_unix_ms, end_unix_ms, source, created_at \
+             FROM external_samples \
+             WHERE metric = ?1 AND start_unix_ms < ?3 AND end_unix_ms > ?2 \
+             ORDER BY start_unix_ms DESC LIMIT 1",
+            params![metric, start_unix_ms, end_unix_ms],
+            external_sample_from_row,
+        )
+        .optional()
+        .map_err(GooseError::from)
+    }
+
+    /// BIO-01: Upsert one daily Bio Age snapshot (INSERT OR REPLACE on the date PK), so
+    /// recomputing the same day overwrites rather than duplicating.
+    pub fn upsert_bio_age_snapshot(
+        &self,
+        date: &str,
+        chrono_age_years: f64,
+        bio_age_years: f64,
+        delta_years: f64,
+        confidence: &str,
+        factors_json: &str,
+    ) -> GooseResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO bio_age_snapshots \
+             (date, chrono_age_years, bio_age_years, delta_years, confidence, factors_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                date,
+                chrono_age_years,
+                bio_age_years,
+                delta_years,
+                confidence,
+                factors_json
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// BIO-01: Return Bio Age snapshots in the inclusive date range [start_date, end_date],
+    /// ordered by date ascending, for trend rendering.
+    pub fn bio_age_snapshots_between(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> GooseResult<Vec<BioAgeSnapshotRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| GooseError::message("store mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT date, chrono_age_years, bio_age_years, delta_years, confidence, factors_json, created_at \
+             FROM bio_age_snapshots \
+             WHERE date >= ?1 AND date <= ?2 \
+             ORDER BY date ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![start_date, end_date], bio_age_snapshot_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -4001,6 +4274,32 @@ pub(super) fn external_sleep_stage_from_row(
         confidence: row.get(6)?,
         provenance_json: row.get(7)?,
         created_at: row.get(8)?,
+    })
+}
+
+fn external_sample_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalSampleRow> {
+    Ok(ExternalSampleRow {
+        platform: row.get(0)?,
+        platform_record_id: row.get(1)?,
+        metric: row.get(2)?,
+        value: row.get(3)?,
+        unit: row.get(4)?,
+        start_unix_ms: row.get(5)?,
+        end_unix_ms: row.get(6)?,
+        source: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+fn bio_age_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BioAgeSnapshotRow> {
+    Ok(BioAgeSnapshotRow {
+        date: row.get(0)?,
+        chrono_age_years: row.get(1)?,
+        bio_age_years: row.get(2)?,
+        delta_years: row.get(3)?,
+        confidence: row.get(4)?,
+        factors_json: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 

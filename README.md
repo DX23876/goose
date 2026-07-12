@@ -12,7 +12,7 @@
 
 <p align="center"><b>Your strap. Your data. Your phone. BLE-direct, self-hosted, no cloud.</b></p>
 
-<p align="center"><sub>Active fork of <a href="https://github.com/b-nnett/goose">b-nnett/goose</a> — expanded with a Rust metrics core, self-hosted server, and full health dashboard.</sub></p>
+<p align="center"><sub>Personal fork of <a href="https://github.com/tigercraft4/goose">tigercraft4/goose</a> (itself a fork of <a href="https://github.com/b-nnett/goose">b-nnett/goose</a>) — extending the health dashboard with Apple Health import, Apple Watch sync, AI coach progress tracking, and a Bio Age score.</sub></p>
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-iOS%2026%2B-007AFF?style=flat-square">
@@ -25,6 +25,7 @@
 
 <p align="center">
   <a href="#features">Features</a> ·
+  <a href="#roadmap-this-fork">Roadmap</a> ·
   <a href="#requirements">Requirements</a> ·
   <a href="#build">Build</a> ·
   <a href="#self-hosted-server">Self-Hosted Server</a> ·
@@ -55,6 +56,24 @@
 - **HealthKit export** — HR, SpO2, HRV, and sleep sessions written to Apple Health after each sync.
 - **Self-hosted server** (optional) — FastAPI + TimescaleDB backend; automatic upload from iOS; Docker Compose setup.
 - **Workout Live Activity** — Dynamic Island and lock-screen widget during workouts.
+
+## Roadmap (this fork)
+
+This fork is extending Goose beyond the WHOOP strap. Full phase-by-phase detail lives in
+[`.planning/milestones/v18.0-apple-health-watch-bioage-PROPOSAL.md`](.planning/milestones/v18.0-apple-health-watch-bioage-PROPOSAL.md);
+the day-to-day project status is tracked in [`.planning/STATE.md`](.planning/STATE.md) and
+[`.planning/ROADMAP.md`](.planning/ROADMAP.md) (the project uses a phase-based "GSD" planning
+workflow — every phase is committed as plans/context/summaries alongside the code that implements it).
+
+| Area | Goal | Status |
+|---|---|---|
+| **Apple Health import** | Bring in years of pre-Goose history (HR, HRV, sleep, workouts) from Apple Health, with WHOOP data always taking priority over Health data on days both exist | Rust core done (`external.*` bridge methods, schema v25) — iOS import UI not yet built |
+| **Apple Watch sync** | Keep dashboards current on strap-off days via background HealthKit delivery — no companion watchOS app | Not started |
+| **AI Coach progress tracking** | Extend the existing on-device Coach with weekly/monthly trend context, goals, and a proactive morning briefing notification | Not started |
+| **Bio Age** | A WHOOP/Bevel-style biological age score with a full per-factor breakdown (VO2max, HRV, resting HR, sleep, activity) against published population norms — sources cited in code, not a black box | Rust engine done (`metrics.bio_age`, schema v26) — Health tab card and detail page not yet built |
+
+None of the four are in the shipped app UI yet — the two "done" rows are Rust core work (schema +
+bridge methods + tests) with no Swift surface wired up so far.
 
 ## Requirements
 

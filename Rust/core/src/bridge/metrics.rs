@@ -17,6 +17,10 @@ use crate::{
         compare_stress_goose_to_reference,
     },
     baselines::EwmaBaseline,
+    bio_age::{
+        ActivityFactorInput, BioAgeInputs, ConfidenceTier, HrvKind, Sex, SleepFactorInput,
+        compute_bio_age,
+    },
     calibration::{
         CalibrationApplicationInput, CalibrationDataset, CalibrationOptions, CalibrationRecord,
         CalibrationReport, apply_calibration, calibration_run_record, evaluate_linear_calibration,
@@ -94,6 +98,10 @@ use crate::{
 
 pub(crate) fn dispatch_metrics(request: &BridgeRequest) -> BridgeResponse {
     match request.method.as_str() {
+        "metrics.bio_age" => request_args::<BioAgeArgs>(request)
+            .and_then(bio_age_bridge)
+            .map(|value| bridge_ok(&request.request_id, value))
+            .unwrap_or_else(|error| bridge_error(&request.request_id, "method_error", error)),
         "metrics.built_in_definitions" => serde_json::to_value(built_in_algorithm_definitions())
             .map_err(|error| GooseError::message(error.to_string()))
             .map(|value| bridge_ok(&request.request_id, value))
@@ -4390,4 +4398,139 @@ fn optical_between_bridge(args: OpticalBetweenArgs) -> GooseResult<serde_json::V
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!(result))
+}
+
+// ===========================================================================
+// BIO-01: metrics.bio_age
+// ===========================================================================
+//
+// Computes a Bio Age from already-resolved fitness markers passed as args. Swift
+// resolves each marker's source (WHOOP-first, Apple Health fallback) via
+// external.resolve_metric_for_day before calling this, so the engine here is a pure
+// compute-plus-persist. Any absent marker is simply omitted and its factor drops out.
+
+#[derive(Debug, Clone, Deserialize)]
+struct BioAgeSleepArg {
+    avg_duration_minutes: f64,
+    efficiency: f64,
+    consistency: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BioAgeActivityArg {
+    avg_daily_steps: f64,
+    avg_active_kcal: f64,
+    weekly_workouts: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BioAgeArgs {
+    database_path: String,
+    /// Date this snapshot is for (YYYY-MM-DD); persisted when write_snapshot is true.
+    date: String,
+    profile_age_years: f64,
+    #[serde(default)]
+    profile_sex: Option<String>,
+    #[serde(default)]
+    vo2max: Option<f64>,
+    #[serde(default)]
+    hrv_value: Option<f64>,
+    /// "rmssd" or "sdnn" — selects the norm table. Required if hrv_value is present.
+    #[serde(default)]
+    hrv_kind: Option<String>,
+    #[serde(default)]
+    resting_hr_bpm: Option<f64>,
+    #[serde(default)]
+    sleep: Option<BioAgeSleepArg>,
+    #[serde(default)]
+    activity: Option<BioAgeActivityArg>,
+    #[serde(default)]
+    days_of_history: u32,
+    /// When true, persist the computed snapshot to bio_age_snapshots (idempotent per date).
+    #[serde(default)]
+    write_snapshot: bool,
+}
+
+fn confidence_str(tier: ConfidenceTier) -> &'static str {
+    match tier {
+        ConfidenceTier::Calibrating => "calibrating",
+        ConfidenceTier::Building => "building",
+        ConfidenceTier::Solid => "solid",
+    }
+}
+
+fn bio_age_bridge(args: BioAgeArgs) -> GooseResult<serde_json::Value> {
+    // HRV requires an explicit kind so SDNN is never scored on the RMSSD table
+    // (healthkit_rmssd_must_not_be_written_as_sdnn). An unknown kind is a hard error
+    // rather than a silent default.
+    let hrv = match (args.hrv_value, args.hrv_kind.as_deref()) {
+        (Some(value), Some("rmssd")) => Some((value, HrvKind::Rmssd)),
+        (Some(value), Some("sdnn")) => Some((value, HrvKind::Sdnn)),
+        (Some(_), other) => {
+            return Err(GooseError::message(format!(
+                "hrv_value requires hrv_kind of 'rmssd' or 'sdnn', got {other:?}"
+            )));
+        }
+        (None, _) => None,
+    };
+
+    let inputs = BioAgeInputs {
+        chrono_age_years: args.profile_age_years,
+        sex: args.profile_sex.as_deref().and_then(Sex::parse),
+        vo2max: args.vo2max,
+        hrv,
+        resting_hr_bpm: args.resting_hr_bpm,
+        sleep: args.sleep.map(|s| SleepFactorInput {
+            avg_duration_minutes: s.avg_duration_minutes,
+            efficiency: s.efficiency,
+            consistency: s.consistency,
+        }),
+        activity: args.activity.map(|a| ActivityFactorInput {
+            avg_daily_steps: a.avg_daily_steps,
+            avg_active_kcal: a.avg_active_kcal,
+            weekly_workouts: a.weekly_workouts,
+        }),
+        days_of_history: args.days_of_history,
+    };
+
+    let result = compute_bio_age(&inputs);
+
+    let factors_json = serde_json::to_string(
+        &result
+            .factors
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "name": f.name,
+                    "value": f.value,
+                    "percentile": f.percentile,
+                    "offset_years": f.offset_years,
+                    "weight": f.weight,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| GooseError::message(e.to_string()))?;
+
+    if args.write_snapshot {
+        let store = acquire_bridge_conn(&args.database_path)?;
+        store.upsert_bio_age_snapshot(
+            &args.date,
+            result.chrono_age_years,
+            result.bio_age_years,
+            result.delta_years,
+            confidence_str(result.confidence),
+            &factors_json,
+        )?;
+    }
+
+    Ok(serde_json::json!({
+        "date": args.date,
+        "chrono_age_years": result.chrono_age_years,
+        "bio_age_years": result.bio_age_years,
+        "delta_years": result.delta_years,
+        "confidence": confidence_str(result.confidence),
+        "factors": serde_json::from_str::<serde_json::Value>(&factors_json)
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    }))
 }

@@ -27,6 +27,7 @@ pub mod algorithm_compare;
 #[cfg(target_os = "android")]
 mod android_jni;
 pub mod baselines;
+pub mod bio_age;
 pub mod bridge;
 pub mod calibration;
 pub mod capabilities;
